@@ -1,0 +1,492 @@
+---
+title: 'European Bank for Reconstruction and Development: A summary of spatial distribution
+of projects and project size'
+layout: post
+status: process
+published: FALSE
+output:
+html_document: 
+fig_height: 6
+fig_width: 8
+keep_md: yes
+pdf_document: default
+---
+```{r, echo=FALSE}
+# Set path to EBRD main directory ".../EBRD/" 
+path <- "/path/to/EBRD"
+try(setwd(path), silent = T)
+
+# Function to create nice looking tables in markdown
+# Source: http://robertmflight.blogspot.de/2012/10/writing-papers-using-r-markdown.html
+tableCat <- function(inFrame) {
+    outText <- paste(names(inFrame), collapse = " | ")
+    outText <- c(outText, paste(rep("---", ncol(inFrame)), collapse = " | "))
+    invisible(apply(inFrame, 1, function(inRow) {
+        outText <<- c(outText, paste(inRow, collapse = " | "))
+    }))
+    return(outText)
+}
+
+projects_costs <- read.csv("projects_costscurr.csv", stringsAsFactors = F)
+```
+
+#### Date: 01.08.2014
+
+This document summarizes the **energy related** projects that were financed by the
+European Bank for Reconstruction and Development. The necessary data was 
+downloaded from the publicly available 
+[project database](http://www.ebrd.com/saf/search.html?type=project) using the following
+scraper written in R that is also available [on Github](githublink.com). It is not
+necessary to execute that code if you would like to reproduce the document.
+The resulting data is available as [`projects_costscurr.csv`](linktocsv.com).
+The code that produces the graphs can be found in the 
+[Rmd-file of this project](linktormd.com).
+
+```{r, eval = F}
+library(XML)
+library(Quandl)
+Sys.setlocale("LC_TIME", "C")
+
+#----------------------------------------------------------------------------
+# Function to translate German month abbreviations into English.
+# Possibly not necessary, but does not do any harm if the dates
+# are already in English.
+# FILE ON GITHUB: translate_date.R
+translate_date <- function(date){
+    Sys.setlocale("LC_TIME", "C")
+    foreign_dates <- c("Mrz", "Mai", "Okt", "Dez")
+    eng_dates <- c("Mar", "May", "Oct", "Dec")
+    split <- unlist(strsplit(date, split = " "))
+    # split[2] is the month name (abbreviated)
+    if (split[2] %in% foreign_dates){
+        split[2] <- eng_dates[which(foreign_dates == split[2])]
+    }
+    date <- paste(split, collapse = " ")
+    return(date)
+}
+
+#-----------------------------------------------------------------------------
+# Function to load the manually saved webpages into R
+# The extracted tables with columns date, project ID, country, 
+# project title, sector, public/private and status are then 
+# merged and returned
+# FILE ON GITHUB: get_projects.R
+get_projects <- function(pathtofiles){
+    library(XML)
+    files <- list.files(pathtofiles, pattern = "htm")
+    files <- paste0(pathtofiles, files) # Full path 
+    projects <- data.frame(matrix(NA, ncol = 7, nrow = length(files) * 25))
+    for (file in seq_along(files)){
+        doc <- htmlTreeParse(files[file], isURL = F, useInternalNodes = T)
+        root <- xmlRoot(doc)
+        table <- readHTMLTable(root)
+        ifelse(file == 1, 
+               projects <- table[2:26, ], 
+               projects <- rbind(projects, table[2:26, ]))
+    }
+    
+    colnames(projects) <- c("Date", "ProjectID", "Country", "Project Title", 
+                            "Sector", "Public/Private", "Status")
+    dates <- as.character(projects$Date)
+    for (i in seq_along(dates)){
+        dates[i] <- translate_date(dates[i])
+    }
+    projects$Date <- as.Date(dates, format = "%d %b %Y")
+    return(projects)
+}
+
+# Store dataframe with project data in "projects" ----------------------------
+projects <- get_projects("HTML/")
+delete <- is.na(projects$ProjectID) | projects$ProjectID == ""
+projects <- projects[-which(delete), ]; rm(delete)
+length(unique(projects$ProjectID))
+# 176 projects left, one project in Turkey had all missing values except for 
+# the country name. One duplicate, will be removed later.
+
+# ------------------------------------------------------------------------------
+# Extract project cost from seperate project page
+# Generate the URL, download the webpage and extract the paragraph about
+# project costs.
+# Function argument should be one row of the projects table
+# TAKES SOME TIME, because all project pages have to be downloaded
+# (alternatively just skip this and load costsCleaner.csv in the next step)
+# FILE ON GITHUB: load_project_cost.R
+load_project_cost <- function(project){
+    library(XML)
+    # Random sleep interval to stress the site less
+    Sys.sleep(sample(seq(1, 3, by=0.01), 1))
+    message("Loading project")
+    date <- as.Date(project$Date, format = "%d %b %Y")
+    year <- format(date, "%Y")
+    id <- as.character(project$ProjectID)
+    # URL scheme: http://www.ebrd.com/english/pages/project/psd/YEAR/PROJECTID.shtml
+    url <- paste0("http://www.ebrd.com/english/pages/project/psd/", 
+                  year, "/", id, ".shtml")
+    # Check if the page can be loaded, if not return cost = NA
+    doc <- try(htmlTreeParse(url, useInternalNodes = T))
+    if (class(doc)[1] == "try-error") {
+        return(c(ProjectID = project$ProjectID, cost = NA, url = url))
+    } else {
+        root <- xmlRoot(doc) 
+        # This xpath statement looks for an h2 (heading) with the text 
+        # "Project Cost" and if found returns the following sibling's text
+        # by which is the paragraph under the heading by applying xmlValue()
+        # (Not sure if normalize space is necessary)
+        xpath <- paste0("//h2[text()[normalize-space(.)='Project Cost']]",
+                        "/following-sibling::*[position()=1 and self::p]")
+        cost <- xpathSApply(doc, 
+                            path = xpath,
+                            fun = xmlValue) 
+        if (is.null(cost)) cost <- "Project cost not found"
+        print(paste(id, cost, url))     
+        return(c(ProjectID = id, cost = cost, url = url))
+    }
+}
+
+#------------------------------------------------------------------------------
+# Use load_project_cost() to loop over all projects in the projects 
+# data frame and return all costs 
+costmat <- matrix(NA, nrow = nrow(projects), ncol = 3)
+colnames(costmat) <- c("ProjectID", "Cost", "URL")
+for (i in 1:nrow(projects)){
+    cost_and_url <- load_project_cost(projects[i, ])
+    costmat[i, ] <- cost_and_url
+}
+# Backup in workspace folder if desired
+# write.csv(costmat, "costs.csv", row.names = F)
+
+# Convert costs paragraph to numeric -------------------------------------------
+# The costs paragraph is very messy.
+# I edited the file MANUALLY (sorry) and saved it as costsCleaner.csv.
+# There are 5 new columns: Cost in millions of Rubles, USD, Euro, Romanian Leu,
+# Turkish Lira and Polish zloty (all numeric).
+
+costsCleaner <- read.csv("costsCleaner.csv",
+                         dec=",", na.strings="", stringsAsFactors=FALSE)
+
+# Merge dataframes
+projects_costs <- merge(projects, costsCleaner, by = "ProjectID")
+# Remove duplicates
+projects_costs <- projects_costs[!duplicated(projects_costs$ProjectID), ]
+dim(projects_costs)
+# 176 unique projects
+
+#-------------------------------------------------------------------------
+# Exchange rate data is needed, download it from Quandl.
+# 500 API calls per day if registered (otherwise 50).
+# Convert USD and RUB to EUR. If necessary (prior to 2000) convert to DM first
+# and then to EUR.
+# The function argument should a data frame with at least the columns
+# CostEURm, CostUSDm, CostRUBm and date
+# Replaces CostEURm if that value is NA
+# FILE ON GITHUB: costs_to_eur.R
+costs_to_eur <- function(projects_costs = projects_costs){
+    library(Quandl)
+    token <- "yourtoken" # hidden
+    # First year 1971
+    DMUSD <- Quandl("FRED/EXGEUS", authcode = Quandl.auth(token)) 
+    currencies <- c("EURRUB", "EURUSD", "EURPLN", "EURRON", "EURTRY")
+    for (i in seq_along(currencies)){
+        if (!exists(currencies[i])){
+            fx <- Quandl(paste0("QUANDL/", currencies[i]),
+                         authcode = Quandl.auth(token))
+            fx <- fx[, c("Date", "Rate")]
+            assign(x = currencies[i], value = fx)
+        }
+    }
+    
+    # All the time series start in 1999
+    EURRUB <- Quandl("QUANDL/EURRUB", authcode = Quandl.auth(token))
+    EURRUB <- EURRUB[, c("Date", "Rate")] # First Date 1999-09-06
+    EURUSD <- Quandl("QUANDL/EURUSD", authcode = Quandl.auth(token))
+    EURUSD <- EURUSD[, c("Date", "Rate")] # First Date 1999-09-06
+    EURPLN <- Quandl("QUANDL/EURPLN", authcode = Quandl.auth(token))
+    EURPLN <- EURPLN[, c("Date", "Rate")] # First Date 1999-09-06
+    EURRON <- Quandl("QUANDL/EURRON", authcode = Quandl.auth(token))
+    EURRON <- EURRON[, c("Date", "Rate")] # First Date 1999-09-06
+    EURTRY <- Quandl("QUANDL/EURTRY", authcode = Quandl.auth(token))
+    EURTRY <- EURTRY[, c("Date", "Rate")] # First Date 1999-09-06
+    
+    for (i in 1:nrow(projects_costs)){
+        date <- projects_costs$Date[i]
+        year <- as.numeric(format(date, format = "%Y"))
+        # Convert TRY to EUR
+        if (!is.na(projects_costs$CostTLm[i])){ # TL, not TRY in EBRD data
+            # Use oldest available value if project date out of range
+            ifelse(test = is.na(EURTRY[EURTRY$Date == date, ]$Rate), 
+                   yes = rate <- tail(EURTRY$Rate, 1),
+                   no = rate <- EURTRY[EURTRY$Date == date, ]$Rate)
+            cost <- projects_costs$CostTLm[i] / rate
+            projects_costs$CostEURm[i] <- cost
+        }
+        # Convert RON to EUR
+        if (!is.na(projects_costs$CostRONm[i])){
+            # Use oldest available value if project date out of range
+            ifelse(test = is.na(EURRON[EURRON$Date == date, ]$Rate), 
+                   yes = rate <- tail(EURRON$Rate, 1),
+                   no = rate <- EURRON[EURRON$Date == date, ]$Rate)
+            cost <- projects_costs$CostRONm[i] / rate
+            projects_costs$CostEURm[i] <- cost
+        }
+        # Convert PLN to EUR
+        if (!is.na(projects_costs$CostPLNm[i])){
+            # Use oldest available value if project date out of range
+            ifelse(test = is.na(EURPLN[EURPLN$Date == date, ]$Rate), 
+                   yes = rate <- tail(EURPLN$Rate, 1),
+                   no = rate <- EURPLN[EURPLN$Date == date, ]$Rate)
+            cost <- projects_costs$CostPLNm[i] / rate
+            projects_costs$CostEURm[i] <- cost
+        }
+        # Convert RUB to EUR
+        if (!is.na(projects_costs$CostRUBm[i])){
+            # Use oldest available value if project date out of range
+            ifelse(test = is.na(EURRUB[EURRUB$Date == date, ]$Rate), 
+                   yes = rate <- tail(EURRUB$Rate, 1),
+                   no = rate <- EURRUB[EURRUB$Date == date, ]$Rate)
+            cost <- projects_costs$CostRUBm[i] / rate
+            projects_costs$CostEURm[i] <- cost
+        }
+        # Convert USD to EUR or DM
+        if (!is.na(projects_costs$CostUSDm[i])){
+            if (year < 2000){ # Convert USD to DM to EUR
+                # Only monthly data
+                date <- format(date, format = "%Y-%m")
+                date <- paste0(date, "-01")
+                rate <- DMUSD[DMUSD$Date == date, ]$Value
+                cost <- projects_costs$CostUSDm[i] / rate
+                # cost are DM now, convert to EUR
+                cost <- cost / 1.9558
+                projects_costs$CostEURm[i] <- cost
+            } else {
+                rate <- EURUSD[EURUSD$Date == date, ]$Rate
+                cost <- projects_costs$CostUSDm[i] / rate
+                projects_costs$CostEURm[i] <- cost
+            }
+        }
+    }
+    return(projects_costs)
+}
+
+# Apply currency conversion function ------------------------------------------
+projects_costs <- costs_to_eur(projects_costs)
+
+#-----------------------------------------------------------------------------
+# Add column with prices in current values (adjusted for inflation) 
+# Convert EUR to current EUR, taking inflation into account
+# CPI Euro Area will be used for the adjustement.
+# Convert all project costs in EUR to current EUR. "Current" refers to June 2014 here.
+# "costs" in the following function should be a data frame with date in the
+# first column ("YYYY-MM-DD" or "YYYY-MM") and the costs in EUR in the second column
+# FILE ON GITHUB: eur_to_current.R
+Sys.setlocale("LC_TIME", "C")
+eur_to_current <- function(cost){
+    library(Quandl)
+    library(zoo)
+    dates <- cost[,1]
+    eur <- cost[,2]
+    if(!exists("CPI")){
+        token <- "yourtoken" # hidden
+        # 1990 - 2014. 2005 = Index 100. Monthly data.
+        CPI <- Quandl("RATEINF/CPI_EUR", collapse="monthly", 
+                      authcode = Quandl.auth(token)) 
+    }
+    CPI$Date <- as.yearmon(CPI$Date)
+    dates <- as.yearmon(dates) # drop day
+    cpiCurr <- CPI[CPI$Date == "Jun 2014",]$CPI
+    toCurr <- function(x){
+        as.numeric(x[2]) * (cpiCurr / CPI[CPI$Date == x[1], ]$CPI)
+    }
+    eurCurr <- apply(X = data.frame(dates, eur), 
+                     MARGIN = 1, 
+                     FUN = toCurr)
+    return(eurCurr)
+}
+
+# Apply inflation adjustment -------------------------------------------------
+CostCurrEURm <- eur_to_current(data.frame(projects_costs$Date, 
+                                          projects_costs$CostEURm))
+projects_costs <- cbind(projects_costs, CostCurrEURm)
+# Save resulting data if desired
+# write.csv(projects_costs, "projects_costscurr.csv", row.names = F)
+
+#----------------------------------------------------------------------------
+# This is the resulting data frame
+str(projects_costs)
+# 'data.frame':      176 obs. of  16 variables:
+# $ ProjectID     : Factor w/ 178 levels "41553","42363",..: 126 151 176 152 153 154 155 156 127 157 ...
+# $ Date          : Date, format: "2005-05-12" "2000-07-24" "1996-10-15" ...
+# $ Country       : Factor w/ 33 levels "Country","Egypt",..: 24 14 21 16 21 31 20 21 24 22 ...
+# $ Project Title : Factor w/ 177 levels "ALPASLAN II DAM HYDRO PROJECT",..: 137 156 176 169 174 172 160 164 135 151 ...
+# $ Sector        : Factor w/ 2 levels "Power and energy",..: 1 1 1 1 1 1 1 1 1 1 ...
+# $ Public/Private: Factor w/ 3 levels "Private","Public",..: 1 2 2 1 2 2 2 2 2 2 ...
+# $ Status        : Factor w/ 10 levels "","BA, PS","Cn",..: 7 7 9 9 9 9 7 3 3 9 ...
+# $ CostRONm      : int  NA NA NA NA NA NA NA NA NA NA ...
+# $ CostTLm       : int  NA NA NA NA NA NA NA NA NA NA ...
+# $ CostPLNm      : num  NA NA NA NA NA NA NA NA NA NA ...
+# $ CostRUBm      : int  NA NA NA NA NA NA NA NA NA NA ...
+# $ CostUSDm      : num  NA NA 163 NA NA ...
+# $ CostEURm      : num  1050 272 54.6 94.2 111 ...
+# $ Cost          : chr  "EUR 1,050 million." "\nApproximately US$ 231 million (€272 million). \n" "US$ 163.20 million." "\nUS$ 78.0 million (€94.2 million).\n" ...
+# $ URL           : chr  "http://www.ebrd.com/english/pages/project/psd/2005/11865.shtml" "http://www.ebrd.com/english/pages/project/psd/2000/12413.shtml" "http://www.ebrd.com/english/pages/project/psd/1996/1314.shtml" "http://www.ebrd.com/english/pages/project/psd/2000/13220.shtml" ...
+# $ CostCurrEURm  : num  1241 358 76 123 145 ...
+```
+
+Since 1996 the EBRD has financed 176 energy related projects in `r length(unique(projects_costs$Country))` different countries with a median project cost of `r round(median(projects_costs$CostEURm, na.rm = T))` million euros and a mean project cost of `r round(mean(projects_costs$CostEURm, na.rm = T))` million euros. Most project costs are below 200 million euros. The EBRD focuses on Eastern Europe and Russia as can be seen below.
+
+## Number of projects
+The next table gives the **number** of projects per country that the EBRD was involved in.
+
+```{r, echo=FALSE}
+# Load data from EBRD scraper
+projects_costs <- read.csv(paste0(path, "projects_costscurr.csv"))
+Country <- levels(projects_costs$Country)
+Projectcount <- as.numeric(summary(projects_costs$Country))
+data <- data.frame(Country, Projectcount)
+```
+```{r, results='asis', echo=FALSE}
+table <- tableCat(data[order(-data$Projectcount),])
+cat(table, sep = "\n")
+```
+
+The following map visualizes where energy related projects were financed, a 
+darker color stands for a higher number of projects. 
+
+```{r, echo=FALSE}
+# Plot number of projects on world map
+suppressWarnings(
+    suppressMessages(
+        library(rworldmap)
+    )
+)
+# The following function can also be found on Github. It is equal to 
+# the function joinCountryData2Map from the package rworldmap but
+# does not use cat() statements to avoid unwanted output in the 
+# markdown document
+if (!exists("joinCountryData2MapNoCat", mode = "function")){
+    source(paste0(path, 'R/joinCountryData2MapNoCat.R'))
+}
+suppressMessages(
+    sPDF <- joinCountryData2MapNoCat(data,
+                                     joinCode = "NAME",
+                                     nameJoinColumn = "Country" )
+)
+par(mai=c(0,0,0.3,0), xaxs="i", yaxs="i")
+suppressMessages(
+    mapCountryData(sPDF, nameColumnToPlot="Projectcount",
+                   oceanCol = "deepskyblue", missingCountryCol = "white",
+                   xlim = c(10, 100), ylim = c(0, 90), 
+                   lwd = 1, borderCol = "black",
+                   mapTitle = "EBRD activity by number of projects")
+)
+```
+
+The number of projects per year is depicted in the following graph. There appears to be a sharp decline in the number of projects in the end of the time series, however this is just due to the fact that projects from the current year are included in which further projects are still to be expected. Overall there is a rising trend in projects per year.
+
+```{r, echo=FALSE}
+library(ggplot2)
+dates <- as.Date(projects_costs$Date)
+year <- as.numeric(format(dates, format="%Y")); rm(dates)
+Year <- as.numeric(names(table(year)))
+Projects <- as.numeric(table(year))
+plotdat <- data.frame(Year, Projects)
+ggplot(plotdat, aes(x = Year, y = Projects)) + geom_line(size = 2) +
+    ggtitle("Number of projects per year")
+```
+
+## Project costs
+
+Information on project costs can be obtained from separate information pages
+at the EBRD website. Project cost always refers to the total project cost 
+which includes the possibility that the EBRD financed only a portion of the
+project or simply granted a loan. In addition to the nominal costs project costs were adjusted for inflation using the 
+[Euro Area Consumer Price Index](http://www.quandl.com/RATEINF/CPI_EUR-Consumer-Price-Index-Euro-Area). 
+Based on the inflation adjustment all costs are given in current (mid 2014) euros 
+in the third column. Note that there are `r sum(is.na(projects_costs$CostEURm))` 
+projects with unknown costs because the data was not yet available or confidential.
+Those projects have been left out of the following computations. All three
+projects in Estonia and Hungary have had unknown costs and the average value
+for these countries is therefore 0 and the mean `NaN`. The sum of **project costs** by country with
+respect to projects the EBRD has financed or has helped finance is given in the
+following table (all costs in millions of euros).
+
+```{r, echo=FALSE}
+data <- aggregate(x = list(projects_costs$CostEURm, projects_costs$CostCurrEURm), 
+                  by = list(projects_costs$Country), 
+                  FUN = sum, na.rm = T)
+colnames(data) <- c("Country", "Nominal EUR (mil.)", "In 2014 EUR (mil.)")
+realmean <- aggregate(x = list(projects_costs$CostCurrEURm), 
+                      by = list(projects_costs$Country), 
+                      FUN = mean, na.rm = T)
+colnames(realmean) <- c("Country", "Mean in 2014 EUR (mil.)")
+data <- merge(data, realmean, by = "Country")
+```
+```{r, results='asis', echo=FALSE}
+data <- data[order(-data$`Nominal EUR (mil.)`),] 
+table <- tableCat(data)
+cat(table, sep = "\n")
+```
+
+The following figure displays the distribution of project costs without aggregating the projects based on countries. The project costs roughly follow an exponential distribution so that the majority of projects are *small* projects while there are a few outliers at the right tail of the distribution. There are seven projects with a size of more than a billion 2014 euros, six of which were public projects and three of them in Russia, two in Poland. With respect to small projects, there are more than 60 projects with costs of less than 100 million 2014 euros.
+
+```{r, echo=FALSE}
+library(ggplot2)
+# Histogram ---------------------------------------
+ggplot(data = projects_costs, aes(x = CostCurrEURm)) + 
+    geom_histogram(col = "white", fill = "black", binwidth = 50) + 
+    ggtitle("Distribution of project costs") +
+    ylab("Count") + xlab("Costs in millions of 2014 EUR (inflation adjusted)") +
+    scale_x_continuous(breaks = seq(from = 250, by = 250, length.out = 30)) + 
+    scale_y_continuous(breaks = seq(from = 5, by = 5, length.out = 10))
+```
+
+The evolution of project sizes over time is depicted in the figure below, which shows the sum of project costs per year (inflation adjusted). The overall trend is rising as in the case of the number of projects per year. Again, the amount for 2014 is preliminary and will likely increase further during the rest of the year.
+
+```{r, echo=FALSE}
+# Time series plot --------------------------------
+dates <- as.Date(projects_costs$Date)
+year <- as.numeric(format(dates, format="%Y")); rm(dates)
+cost_ts <- aggregate(x = projects_costs$CostCurrEURm, 
+                     by = list(year), 
+                     FUN = sum, na.rm = T)
+rm(year)
+colnames(cost_ts) <- c("Year", "CostsEURm")
+ggplot(cost_ts, aes(x = Year, y = CostsEURm)) + geom_line(size = 2) +
+    ggtitle("Project costs per year (million EUR, inflation adjusted)")
+```
+
+The next map displays the spatial distribution of project costs (2014 euros and in logarithmic form to achieve more equal group sizes due to the distribution of project costs). Several countries get assigned to different categories but the overall picture is comparable to the previous map. Discrepancies would imply an unusual mean project cost which was already given in the table above.
+
+```{r, echo=FALSE}
+data["logCostsReal"] <- log(data$`In 2014 EUR (mil.)`)
+data[data["logCostsReal"] == "-Inf", "logCostsReal"] <- 0
+suppressMessages(
+    sPDF <- joinCountryData2MapNoCat(data,
+                                     joinCode = "NAME",
+                                     nameJoinColumn = "Country",
+                                     verbose = F)
+)
+
+par(mai=c(0,0,0.3,0), xaxs="i", yaxs="i")
+suppressMessages(
+    mapCountryData(sPDF, nameColumnToPlot="logCostsReal", numCats = 3,
+                   oceanCol = "deepskyblue", missingCountryCol = "white",
+                   xlim = c(10, 100), ylim = c(0, 90), 
+                   lwd = 1, borderCol = "black",
+                   mapTitle = "EBRD funding by total real project costs (log)")
+)
+```
+
+Zoomed in on Eastern Europe the details are visible more clearly:
+
+```{r, echo=FALSE}
+# Zoomed in --------------------------------------------------------------------
+suppressMessages(
+    mapCountryData(sPDF, nameColumnToPlot="logCostsReal", numCats = 3, 
+                   addLegend = F,
+                   oceanCol = "deepskyblue", missingCountryCol = "white",
+                   xlim = c(20, 40), ylim = c(30, 60), 
+                   lwd = 1, borderCol = "black",
+                   mapTitle = "EBRD funding by total real project costs (log)")
+)
+```
+
